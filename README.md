@@ -4,6 +4,10 @@ A lightweight internal tool for organizing and analyzing matrix-based protein–
 
 It is designed to replace repetitive manual workflows by enabling batch job generation, structured result parsing, and region-specific interface analysis across many protein pairs.
 
+<img width="1792" height="1030" alt="image" src="https://github.com/user-attachments/assets/1fb62bb0-9cb4-496e-9133-6c23d1933959" />
+<img width="1792" height="1030" alt="image" src="https://github.com/user-attachments/assets/a483506c-ae56-46aa-b1c0-e6c5ae4b6fb5" />
+
+
 ## Overview
 
 AlphaFold Server is powerful, but screening multiple protein–protein combinations requires:
