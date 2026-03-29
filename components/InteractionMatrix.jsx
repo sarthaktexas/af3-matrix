@@ -56,11 +56,15 @@ function InteractionMatrix({ baitProteins, preyProteins, results, onCellClick })
     return <Tooltip.Root key={`${bait.name}-${prey.name}`}>
                       <Tooltip.Trigger asChild>
                         <button
-      onClick={() => hasResult && onCellClick({
-        bait: bait.name,
-        prey: prey.name,
-        score: result?.score || 0
-      })}
+      onClick={() =>
+                        hasResult &&
+                        onCellClick({
+                          bait: bait.name,
+                          prey: prey.name,
+                          score: result?.score || 0,
+                          ipTM: result?.ipTM ?? 0,
+                          pairId: result?.pairId ?? null
+                        })}
       className={`
                             ${colorClass} p-3 text-sm font-medium 
                             ${hasResult ? "hover:ring-2 hover:ring-blue-500 hover:ring-inset cursor-pointer" : "cursor-default"}
@@ -81,8 +85,9 @@ function InteractionMatrix({ baitProteins, preyProteins, results, onCellClick })
                               <div className="font-medium">
                                 {bait.name} × {prey.name}
                               </div>
-                              <div className="text-gray-300">Score: {result.score.toFixed(2)}</div>
-                              <div className="text-gray-300">ipTM: {result.ipTM.toFixed(2)}</div>
+                              <div className="text-gray-300">
+                                ipTM (or pTM if no ipTM): {result.score.toFixed(2)}
+                              </div>
                             </div>
                             <Tooltip.Arrow className="fill-gray-900" />
                           </Tooltip.Content>

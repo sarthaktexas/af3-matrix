@@ -17,56 +17,87 @@ Streamlining this process into a single workflow, this program:
 
 1. Defines proteins and interaction matrix
 2. Generates AF3-compatible JSON jobs in bulk
-3. Uploads AF3 results
-4. Automatically parses all predictions
-5. Ranks interactions based on confidence, interface properties, and residue targeting
+3. Uploads AF3 result archives
+4. Automatically parses predictions from extracted outputs
+5. Exposes APIs to list results, fetch pair detail, and run interface / region / composite scoring (up to five models per pair)
 
-## Key Features
+## Tech stack
 
-### Matrix-Based Screening
-- Define bait x prey interaction matrices
-- Supports small screens and expanded combinatorial sets
+- **Next.js** 15 (Pages Router) + **React** 18
+- **Tailwind CSS** 4
+- **Backend:** Node API routes under `pages/api/`
+- **Persistence (choose one):**
+  - **Local (default):** filesystem under `data/af3-matrix/` (or `AF3_DATA_DIR`)
+  - **Serverless / Vercel:** **Vercel Blob** (parsed JSON + extracted files + export batches) + **Supabase** (Postgres: session manifests + ingest index)
 
-### AF3 Job Generation
-- Bulk export of AF3-compatible JSON files
-- Batch splitting to respect daily submission limits
+## Configuration
 
-### Multi-Model Parsing
-- Processes all 5 AF3 predictions per job
-- Extracts confidence metrics (e.g., ipTM, ranking_score)
+Copy `.env.example` to `.env.local` for local development.
 
-### Interface Detection
-- Identifies inter-chain contacts using distance cutoffs
-- Computes interface size and contact density
+### Local-only mode (default)
 
-### Region-Aware Analysis
-- Annotate residue ranges of interest (e.g., catalytic or regulatory regions)
-- Quantifies:
-  - % of region involved in interface
-  - % of interface localized to region
+Do **not** set the three cloud variables below. All session data, ingests, and exports are written under:
 
-### Interaction Ranking
-- Combines:
-  - AF3 confidence metrics
-  - interface geometry
-  - region overlap
-- Produces ranked heatmaps for rapid prioritization
+`{projectRoot}/data/af3-matrix/`
 
-### Visualization
-- Matrix/heatmap view of all interactions
-- Pair-level inspection with structure viewer (Mol*)
+You can override the folder with `AF3_DATA_DIR` (path relative to the project root or absolute). This is ignored when cloud storage is active.
 
-## Intended Use
+### Cloud mode (Vercel Blob + Supabase)
 
-This tool is designed for:
+Set **all** of the following; if any is missing, the app stays in local filesystem mode:
 
-- internal screening workflows
-- hypothesis generation
-- prioritization of protein–protein interactions
+| Variable | Purpose |
+|----------|---------|
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob read/write token |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (server-only; never expose to the client) |
 
-It is **not** intended to directly predict binding affinity or replace experimental validation.
+**Supabase schema:** run the SQL in `supabase/migrations/20250328120000_af3_matrix.sql` (Supabase SQL editor or CLI). That creates `af3_session_manifests` and `af3_ingests`. Row Level Security is enabled; the service role bypasses RLS for these server-side APIs.
 
-## Installation (Local Development)
+**Vercel:** add the same env vars to the project and redeploy. Large uploads are still subject to Vercel request/body limits.
+
+## HTTP API (summary)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/pairs/generate` | Validate proteins, build bait x prey pairs, save manifest |
+| `POST` | `/api/af3/export` | Load manifest, chunk AF Server jobs, persist batch JSON (disk or Blob) |
+| `POST` | `/api/results/upload` | Multipart ZIP → extract → parse → persist envelope + extracted tree |
+| `GET` | `/api/results` | `?sessionId=` (optional `ingestId=`) — list ingests and pair summaries |
+| `GET` | `/api/results/[pairId]` | `?sessionId=` & optional `ingestId=` — full job + per-model metrics + `pairSummary` |
+| `POST` | `/api/analysis/pair` | Structural interface (Cα cutoff), region overlap, composite score (≤5 models) |
+
+Session and ingest identifiers are opaque strings returned by the generate/upload flows; the client must pass `sessionId` (and `ingestId` when disambiguating) to results and analysis routes.
+
+## Key features (current codebase)
+
+### Matrix-based screening
+
+- Define bait × prey combinations from named sequences (see `lib/pairs.js`).
+- Optional **regions** per protein (1-based inclusive indices) for overlap metrics.
+
+### AF3 job generation
+
+- Bulk export of AlphaFold Server–compatible JSON (`lib/af3-export.js`).
+- Configurable batch size within documented min/max bounds.
+
+### Parsing
+
+- Defensive parsing of AF3-style ZIP trees: ranking CSV, top model, seed/sample folders (`lib/parse-af3.js`).
+- Confidence fields surfaced from summary/full JSON where present (e.g. ipTM, pTM, ranking-style scores).
+
+### Interface detection & scoring
+
+- **Cα–Cα distance cutoff** interface residues (`lib/interface-analysis.js`; default cutoff documented in that module).
+- **Region overlap** recall / Jaccard-style metrics vs interface residue sets (`lib/region-overlap.js`).
+- **Composite ranking** combining confidence, interface footprint, and region overlap; aggregates across up to five models (`lib/scoring.js`).
+
+### UI
+
+- Matrix / heatmap-style interaction grid and modals for generating jobs and uploading results (`components/`).
+- Pair detail panel is still largely **placeholder / mock metrics** for layout; it does not yet embed a live structure viewer (e.g. Mol*) wired to real API data.
+
+## Installation (local development)
 
 ```bash
 git clone https://github.com/sarthaktexas/af3-matrix.git
@@ -75,19 +106,35 @@ npm install
 npm run dev
 ```
 
+Open the app at the URL shown in the terminal (typically `http://localhost:3000`).
+
 ## Workflow
-1.	Upload or define protein sequences
-2.	Select bait and prey sets
-3.	Annotate residue regions of interest
-4.	Generate AF3 job batches
-5.	Submit jobs via AlphaFold Server (manual step)
-6.	Upload AF3 result ZIP files
-7.	Explore ranked interaction matrix
+
+1. Upload or define protein sequences (UI and/or `POST /api/pairs/generate`).
+2. Select bait and prey sets and optional regions.
+3. Generate AF3 job batches (`POST /api/af3/export` or UI).
+4. Submit jobs via **AlphaFold Server** (manual step; Google account and quotas apply).
+5. Upload AF3 result ZIPs (`POST /api/results/upload` or UI).
+6. Query results (`GET /api/results`, `GET /api/results/[pairId]`) and optional structural analysis (`POST /api/analysis/pair`).
+7. Use the matrix UI for prioritization (scores in the UI may still be demo data until fully wired to the APIs).
+
+## Project layout (selected)
+
+- `pages/api/` — API routes
+- `lib/storage*.js`, `lib/supabase-admin.js` — persistence (local vs Blob + Supabase)
+- `lib/parse-af3.js` — AF3 output discovery and parsing
+- `lib/pairs.js`, `lib/af3-export.js` — pair generation and batch export
+- `lib/interface-analysis.js`, `lib/region-overlap.js`, `lib/scoring.js` — structure and ranking logic
+- `lib/results-query.js` — ingest listing and pair summaries for results APIs
+- `lib/ingest-to-matrix.js` — map upload summaries into matrix cell keys (`bait:prey`)
+- `supabase/migrations/` — SQL for cloud mode
+- `components/` — React UI
 
 ## Notes
--	Requires manual interaction with AlphaFold Server (Google account + daily job limits)
--	Designed to operate locally without cloud infrastructure
--	Optimized for rapid iteration in research environments
+
+- AlphaFold Server interaction (login, submission, quotas) remains **manual**.
+- **Local mode** needs write access to the data directory; **cloud mode** needs valid Blob and Supabase credentials.
+- Parsed envelopes can be large (including embedded/truncated JSON indexes); detail APIs avoid returning the heaviest maps where possible.
 
 ## License
 

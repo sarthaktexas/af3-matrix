@@ -1,9 +1,16 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { InteractionMatrix } from "./InteractionMatrix";
+import { resultsMapFromSessionApiPayload } from "@/lib/ingest-to-matrix";
+import { normalizeIngestId } from "@/lib/ingest-id";
 import { DetailPanel } from "./DetailPanel";
 import { Toolbar } from "./Toolbar";
 import { ProteinUploadModal } from "./ProteinUploadModal";
 import { ProteinListModal } from "./ProteinListModal";
+import { UploadResultsModal } from "./UploadResultsModal";
+import { GenerateAf3JobsModal } from "./GenerateAf3JobsModal";
+
+const LS_SESSION_KEY = "af3-matrix-session";
+
 function MatrixApp() {
   const [proteins, setProteins] = useState([
     // Default bait proteins
@@ -123,6 +130,149 @@ function MatrixApp() {
   const [detailPanelOpen, setDetailPanelOpen] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [manageModalOpen, setManageModalOpen] = useState(false);
+  const [resultsModalOpen, setResultsModalOpen] = useState(false);
+  const [generateModalOpen, setGenerateModalOpen] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
+  const [resultsContext, setResultsContext] = useState(null);
+  const sessionApplyGenRef = useRef(0);
+
+  const applySessionDetail = async (detail) => {
+    if (!detail?.ok) return false;
+    const applyGen = ++sessionApplyGenRef.current;
+    setSessionId(detail.sessionId);
+    if (Array.isArray(detail.proteins) && detail.proteins.length > 0) {
+      setProteins(detail.proteins);
+    }
+    const latest = detail.latestIngestId;
+    setResultsContext(
+      latest ? { sessionId: detail.sessionId, ingestId: latest } : null
+    );
+    if (latest) {
+      const r = await fetch(
+        `/api/results?sessionId=${encodeURIComponent(detail.sessionId)}&ingestId=${encodeURIComponent(latest)}`
+      );
+      const data = await r.json().catch(() => ({}));
+      if (applyGen !== sessionApplyGenRef.current) {
+        return false;
+      }
+      if (data.ok && Array.isArray(data.ingests)) {
+        const map = resultsMapFromSessionApiPayload(data);
+        setResults(map);
+      }
+      /* Do not clear the matrix on 404/5xx — transient GET failures were wiping UI + detail panel context. */
+    } else {
+      if (applyGen !== sessionApplyGenRef.current) {
+        return false;
+      }
+      setResults(new Map());
+    }
+    try {
+      localStorage.setItem(
+        LS_SESSION_KEY,
+        JSON.stringify({
+          sessionId: detail.sessionId,
+          ingestId: latest ?? null
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+    return true;
+  };
+
+  const loadSessionById = async (sid) => {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`);
+    const detail = await res.json().catch(() => ({}));
+    if (!res.ok) return false;
+    return applySessionDetail(detail);
+  };
+
+  const handleClearSession = () => {
+    sessionApplyGenRef.current += 1;
+    setSessionId(null);
+    setResultsContext(null);
+    setResults(new Map());
+    try {
+      localStorage.removeItem(LS_SESSION_KEY);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  useEffect(() => {
+    if (!sessionId) return;
+    try {
+      localStorage.setItem(
+        LS_SESSION_KEY,
+        JSON.stringify({
+          sessionId,
+          ingestId: normalizeIngestId(resultsContext?.ingestId) || null
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [sessionId, resultsContext]);
+
+  /**
+   * Matrix cells only need `results` Map entries; the detail modal also needs ingestId to call
+   * /api/analysis/pair. If sessionId is set but resultsContext lost ingestId (race, partial restore,
+   * or cloud vs local mismatch), recover latestIngestId from the session API.
+   */
+  useEffect(() => {
+    const sid = sessionId != null ? String(sessionId).trim() : "";
+    if (!sid) return;
+    if (normalizeIngestId(resultsContext?.ingestId)) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`);
+        const detail = await res.json().catch(() => ({}));
+        if (cancelled || !detail.ok) {
+          return;
+        }
+        const latest = detail.latestIngestId;
+        const n = normalizeIngestId(latest);
+        if (!n) {
+          return;
+        }
+        setResultsContext((prev) => {
+          if (normalizeIngestId(prev?.ingestId)) return prev;
+          return { sessionId: sid, ingestId: n };
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, resultsContext?.ingestId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = localStorage.getItem(LS_SESSION_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const sid = parsed?.sessionId;
+        if (!sid || typeof sid !== "string") return;
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`);
+        const detail = await res.json().catch(() => ({}));
+        if (cancelled || !detail.ok) return;
+        await applySessionDetail(detail);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restore once on mount from localStorage
+  }, []);
+
   const handleAddProteins = (newProteins) => {
     setProteins([...proteins, ...newProteins]);
   };
@@ -135,6 +285,13 @@ function MatrixApp() {
   };
   const handleCloseDetail = () => {
     setDetailPanelOpen(false);
+  };
+  const mergeResults = (incoming) => {
+    setResults((prev) => {
+      const next = new Map(prev);
+      for (const [k, v] of incoming) next.set(k, v);
+      return next;
+    });
   };
   const baitProteins = proteins.filter(
     (p) => p.type === "bait"
@@ -154,16 +311,15 @@ function MatrixApp() {
           <Toolbar
     onUploadProteins={() => setUploadModalOpen(true)}
     onManageProteins={() => setManageModalOpen(true)}
-    onGenerateJobs={() => alert(
-      "Generate jobs functionality - integrate with your backend"
-    )}
-    onUploadResults={() => alert(
-      "Upload results functionality - integrate with your backend"
-    )}
+    onGenerateJobs={() => setGenerateModalOpen(true)}
+    onUploadResults={() => setResultsModalOpen(true)}
     proteinCount={{
       bait: baitProteins.length,
       prey: preyProteins.length
     }}
+    sessionId={sessionId}
+    onLoadSession={loadSessionById}
+    onClearSession={handleClearSession}
   />
 
           {
@@ -194,6 +350,23 @@ function MatrixApp() {
     onDeleteProtein={handleDeleteProtein}
   />
 
+      <UploadResultsModal
+    open={resultsModalOpen}
+    onClose={() => setResultsModalOpen(false)}
+    sessionId={sessionId}
+    onSessionIdChange={setSessionId}
+    onApplyResults={mergeResults}
+    onIngestLoaded={(ctx) => setResultsContext(ctx)}
+  />
+
+      <GenerateAf3JobsModal
+    open={generateModalOpen}
+    onClose={() => setGenerateModalOpen(false)}
+    proteins={proteins}
+    sessionId={sessionId}
+    onSessionIdChange={setSessionId}
+  />
+
       {
     /* Detail Panel */
   }
@@ -201,6 +374,9 @@ function MatrixApp() {
     data={selectedInteraction}
     open={detailPanelOpen}
     onClose={handleCloseDetail}
+    sessionId={sessionId ?? ""}
+    ingestId={normalizeIngestId(resultsContext?.ingestId) ?? ""}
+    proteins={proteins}
   />
     </div>;
 }
